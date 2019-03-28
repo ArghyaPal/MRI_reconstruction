@@ -24,7 +24,6 @@ from anet_model import AnetModel
 from args import get_args
 
 args = get_args()
-print(args)
 train_loader, dev_loader = utils.create_data_loaders(args)    
 
 # ### Custom dataset class
@@ -80,6 +79,8 @@ else:
     start_epoch = 0
     train = True
 
+print(model)
+
 # if args.resume:
 #     checkpoint, model optimizer = load_model(args.checkpoint)
 #     #best_val_loss = checkpoint['best_val_loss']
@@ -104,7 +105,7 @@ for i in range(start_epoch, args.epoch):
         total_loss = 0.0
         model.train()
         for j, data in enumerate(train_loader):
-            original_kspace,masked_kspace, mask = data
+            original_kspace, masked_kspace, mask, target, fname, slice_index = data
             #normalizing the kspace
             nmasked_kspace,mdivisor = utils.imagenormalize(masked_kspace)
             noriginal_kspace,odivisor = utils.imagenormalize(original_kspace,mdivisor)

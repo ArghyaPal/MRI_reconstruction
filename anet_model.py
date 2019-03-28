@@ -77,41 +77,28 @@ class AnetModel(nn.Module):
         self.num_pool_layers = num_pool_layers
         self.drop_prob = drop_prob
 
-        self.up_sample_layers = nn.ModuleList([ConvBlock(in_chans, chans, drop_prob)])
+        self.conv1 = ConvBlock(in_chans, in_chans, drop_prob)
+
+        self.down_sample_layers = nn.ModuleList([ConvBlock(in_chans, chans, drop_prob)])
         ch = chans
         for i in range(num_pool_layers - 1):
-            self.up_sample_layers += [ConvBlock(ch, ch * 2, drop_prob)]
+            self.down_sample_layers += [ConvBlock(ch, ch * 2, drop_prob)]
             ch *= 2
-        self.conv = ConvBlock(ch, ch, drop_prob)
 
-        self.down_sample_layers = nn.ModuleList()
+        self.conv2 = ConvBlock(ch, ch, drop_prob)
+
+        self.up_sample_layers = nn.ModuleList()
         for i in range(num_pool_layers - 1):
-            self.down_sample_layers += [ConvBlock(ch * 2, ch // 2, drop_prob)]
+            self.up_sample_layers += [ConvBlock(ch * 2, ch // 2, drop_prob)]
             ch //= 2
-        self.down_sample_layers += [ConvBlock(ch * 2, ch, drop_prob)]
-        self.conv2 = nn.Sequential(
+        self.up_sample_layers += [ConvBlock(ch * 2, ch, drop_prob)]
+        
+        self.conv3 = nn.Sequential(
             nn.Conv2d(ch, ch // 2, kernel_size=1),
             nn.Conv2d(ch // 2, out_chans, kernel_size=1),
+            nn.MaxPool2d(kernel_size = 2),
             nn.Conv2d(out_chans, out_chans, kernel_size=1),
         )
-
-        # self.down_sample_layers = nn.ModuleList([ConvBlock(in_chans, chans, drop_prob)])
-        # ch = chans
-        # for i in range(num_pool_layers - 1):
-        #     self.down_sample_layers += [ConvBlock(ch, ch * 2, drop_prob)]
-        #     ch *= 2
-        # self.conv = ConvBlock(ch, ch, drop_prob)
-
-        # self.up_sample_layers = nn.ModuleList()
-        # for i in range(num_pool_layers - 1):
-        #     self.up_sample_layers += [ConvBlock(ch * 2, ch // 2, drop_prob)]
-        #     ch //= 2
-        # self.up_sample_layers += [ConvBlock(ch * 2, ch, drop_prob)]
-        # self.conv2 = nn.Sequential(
-        #     nn.Conv2d(ch, ch // 2, kernel_size=1),
-        #     nn.Conv2d(ch // 2, out_chans, kernel_size=1),
-        #     nn.Conv2d(out_chans, out_chans, kernel_size=1),
-        # )
 
     def forward(self, input):
         """
@@ -123,17 +110,21 @@ class AnetModel(nn.Module):
         """
         stack = []
         output = input
-        # Apply up-sampling layers
-        for layer in self.up_sample_layers:
-            output = F.interpolate(output, scale_factor=2, mode='bilinear', align_corners=False)
-            stack.append(output)
-            output = layer(output)
-        return self.conv2(output)
+        output = F.interpolate(output, scale_factor=2, mode='bilinear', align_corners=False)
+
+        output = self.conv1(output)
 
         # Apply down-sampling layers
         for layer in self.down_sample_layers:
             output = layer(output)
-            output = torch.cat([output, stack.pop()], dim=1)
+            stack.append(output)
             output = F.max_pool2d(output, kernel_size=2)
 
-        output = self.conv(output)
+        output = self.conv2(output)
+
+        # Apply up-sampling layers
+        for layer in self.up_sample_layers:
+            output = F.interpolate(output, scale_factor=2, mode='bilinear', align_corners=False)
+            output = torch.cat([output, stack.pop()], dim=1)
+            output = layer(output)
+        return self.conv3(output)
