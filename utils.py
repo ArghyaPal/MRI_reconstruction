@@ -81,7 +81,7 @@ class SliceData(Dataset):
             raise ValueError('challenge should be either "singlecoil" or "multicoil"')
 
         self.transform = transform
-        self.recons_key = 'reconstruction_esc' if challenge == 'singlecoil' else 'reconstruction_rss'
+        self.recons_key = 'reconstruction_esc' if challenge == 'singlecoil'             else 'reconstruction_rss'
         self.challenge = challenge
 
         self.examples = []
@@ -103,7 +103,7 @@ class SliceData(Dataset):
         with h5py.File(fname, 'r') as data:
             kspace = data['kspace'][slice]
             target = data[self.recons_key][slice] if self.recons_key in data else None
-            return self.transform(kspace, fname.name, target)
+            return self.transform(kspace, target, self.challenge, fname.name, slice)
 
 
 # ### Data Transform (return original and masked kspace)
@@ -114,18 +114,40 @@ class DataTransform:
     Data Transformer for training DAE.
     """
 
-    def __init__(self, mask_func, resolution, use_seed=True):
+    def __init__(self, mask_func, resolution, reduce, use_seed=True):
         self.mask_func = mask_func
         self.use_seed = use_seed
         self.resolution = resolution
+        self.reduce = reduce
 
-    def __call__(self, kspace, fname, target):
+    def __call__(self, kspace, target, challenge, fname, slice_index):
         original_kspace = transforms.to_tensor(kspace)
-        original_kspace = reducedimension(original_kspace, self.resolution)
+        
+        if self.reduce:
+            original_kspace = reducedimension(original_kspace, self.resolution)
+        
         # Apply mask
         seed = None if not self.use_seed else tuple(map(ord, fname))
         masked_kspace, mask = transforms.apply_mask(original_kspace, self.mask_func, seed)
-        return original_kspace, masked_kspace, mask
+
+        # Inverse Fourier Transform to get zero filled solution
+        image = transforms.ifft2(masked_kspace)
+        # Crop input image
+        image = transforms.complex_center_crop(image, (self.resolution, self.resolution))
+        # Absolute value
+        image = transforms.complex_abs(image)
+        # Apply Root-Sum-of-Squares if multicoil data
+        if challenge == 'multicoil':
+            image = transforms.root_sum_of_squares(image)
+        # Normalize input
+        image, mean, std = transforms.normalize_instance(image, eps=1e-11)
+
+        target = transforms.to_tensor(target)
+        # Normalize target
+        target = transforms.normalize(target, mean, std, eps=1e-11)
+        target = target.clamp(-6, 6)
+        return original_kspace, masked_kspace, mask, target, fname, slice_index
+
 
 # ### Creating data loaders
 
@@ -136,14 +158,14 @@ def create_datasets(args):
     dev_mask = MaskFunc(args.center_fractions, args.accelerations)
 
     train_data = SliceData(
-        root=args.data_path + 'singlecoil_train',
-        transform=DataTransform(train_mask, args.resolution),
+        root= args.data_path + '/singlecoil_train',
+        transform=DataTransform(train_mask, args.resolution, args.reduce),
         sample_rate=args.sample_rate,
         challenge=args.challenge
     )
     dev_data = SliceData(
-        root=args.data_path + 'singlecoil_val',
-        transform=DataTransform(dev_mask, args.resolution, use_seed=True),
+        root= args.data_path + '/singlecoil_val',
+        transform=DataTransform(dev_mask, args.resolution, args.reduce, use_seed=True),
         sample_rate=args.sample_rate,
         challenge=args.challenge,
     )
@@ -182,9 +204,11 @@ def croppedimage(kspace, resolution):
     image = transforms.complex_center_crop(image, (resolution, resolution))
     return image
 
-def kspaceto2dimage(kspace,cropping = False):
+def kspaceto2dimage(kspace, cropping = False, resolution = None):
     if cropping:
-        image = croppedimage(kspace)
+        if not resolution:
+            raise Exception("If cropping = True, pass the value for resolution for the function: kspaceto2dimage")
+        image = croppedimage(kspace, resolution)
     else:
         image = transforms.ifft2(kspace)
     # Absolute value
@@ -301,3 +325,10 @@ def load_model(checkpoint_file):
     optimizer = torch.optim.Adam(parameters, lr=args.learning_rate)
     optimizer.load_state_dict(checkpoint['optimizer'])
     return checkpoint, encoder, decoder, optimizer
+
+def save_tensors(tensors_dict, out_dir, fname):
+    out_dir.mkdir(exist_ok=True)
+    with h5py.File(out_dir / fname, 'w') as f:
+        for tensor_name in tensors_dict:
+            tensors_dict[tensor_name]= [t.numpy() for t in tensors_dict[tensor_name]]
+            f.create_dataset(tensor_name, data=tensors_dict[tensor_name])
