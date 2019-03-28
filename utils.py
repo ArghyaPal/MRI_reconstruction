@@ -103,7 +103,7 @@ class SliceData(Dataset):
         with h5py.File(fname, 'r') as data:
             kspace = data['kspace'][slice]
             target = data[self.recons_key][slice] if self.recons_key in data else None
-            return self.transform(kspace, fname.name, target, self.challenge)
+            return self.transform(kspace, fname.name, target)
 
 
 # ### Data Transform (return original and masked kspace)
@@ -119,31 +119,13 @@ class DataTransform:
         self.use_seed = use_seed
         self.resolution = resolution
 
-    def __call__(self, kspace, fname, target, challenge):
+    def __call__(self, kspace, fname, target):
         original_kspace = transforms.to_tensor(kspace)
+        original_kspace = reducedimension(original_kspace, self.resolution)
         # Apply mask
         seed = None if not self.use_seed else tuple(map(ord, fname))
         masked_kspace, mask = transforms.apply_mask(original_kspace, self.mask_func, seed)
-        
-         # Inverse Fourier Transform to get zero filled solution
-        image = transforms.ifft2(masked_kspace)
-        # Crop input image
-        image = transforms.complex_center_crop(image, (self.resolution, self.resolution))
-        # Absolute value
-        image = transforms.complex_abs(image)
-        # Apply Root-Sum-of-Squares if multicoil data
-        if challenge == 'multicoil':
-            image = transforms.root_sum_of_squares(image)
-        # Normalize input
-        image, mean, std = transforms.normalize_instance(image, eps=1e-11)
-        
-        target = transforms.to_tensor(target)
-        # Normalize target
-        target = transforms.normalize(target, mean, std, eps=1e-11)
-        target = target.clamp(-6, 6)
-        
-        return original_kspace, masked_kspace, target, mask
-
+        return original_kspace, masked_kspace, mask
 
 # ### Creating data loaders
 
@@ -176,11 +158,13 @@ def create_data_loaders(args, if_shuffle = True):
         batch_size=args.batch_size,
         shuffle=if_shuffle, 
         pin_memory=True,
+        num_workers = 4,
     )
     dev_loader = DataLoader(
         dataset=dev_data,
         batch_size=args.batch_size,
         pin_memory=True,
+        num_workers = 4,
     )
     return train_loader, dev_loader
 
@@ -188,17 +172,24 @@ def create_data_loaders(args, if_shuffle = True):
 
 import matplotlib.pyplot as plt
 
-def kspacetoimage(kspace, args):
-    # Inverse Fourier Transform to get zero filled solution
+def reducedimension(kspace, resolution):
+    image = croppedimage(kspace, resolution)
+    kspace = transforms.fft2(image)
+    return kspace
+    
+def croppedimage(kspace, resolution):
     image = transforms.ifft2(kspace)
-        # Crop input image
-    image = transforms.complex_center_crop(image, (args.resolution, args.resolution))
-        # Absolute value
+    image = transforms.complex_center_crop(image, (resolution, resolution))
+    return image
+
+def kspaceto2dimage(kspace,cropping = False):
+    if cropping:
+        image = croppedimage(kspace)
+    else:
+        image = transforms.ifft2(kspace)
+    # Absolute value
     image = transforms.complex_abs(image)
-        # Apply Root-Sum-of-Squares if multicoil data
-    if args.challenge == 'multicoil':
-        image = transforms.root_sum_of_squares(image)
-        # Normalize input
+    # Normalize input
     image, mean, std = transforms.normalize_instance(image, eps=1e-11)
     image = image.clamp(-6, 6)
 
@@ -248,88 +239,65 @@ def compare_images(imageA, imageB,imageC,writer,iteration):
     plt.imshow(imageC)
     plt.axis("off")
     
+    plt.show()
     writer.add_figure('Comparision', fig, global_step = iteration)    
 
-def compareimageoutput(target,masked_kspace,outputkspace,mask,writer,iteration, args):
+def compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,iteration,index):
     unmask = np.where(mask==1.0, 0.0, 1.0)
     unmask = transforms.to_tensor(unmask)
     unmask = unmask.float()
     output = transformback(outputkspace.data.cpu())
     output = output * unmask
     output = output + masked_kspace.data.cpu()
-    imageA = np.array(target)[0]
-    imageB = np.array(kspacetoimage(output, args))[0]
-    imageC = np.array(kspacetoimage(masked_kspace.data.cpu(), args))[0]
+    imageA = np.array(kspaceto2dimage(original_kspace.data.cpu()))[index]
+    imageB = np.array(kspaceto2dimage(output))[index]
+    imageC = np.array(kspaceto2dimage(masked_kspace.data.cpu()))[index]
     compare_images(imageA,imageB,imageC,writer,iteration)
 
-def onormalize(original_kspace, mean, std, eps=1e-11):
-    #getting image from masked data
-    image = transforms.ifft2(original_kspace)
-    #normalizing the image
-    nimage = transforms.normalize(image, mean, std, eps=1e-11)
-    #getting kspace data from normalized image
-    original_kspace_fni = transforms.ifftshift(nimage, dim=(-3, -2))
-    original_kspace_fni = torch.fft(original_kspace_fni, 2)
-    original_kspace_fni = transforms.fftshift(original_kspace_fni, dim=(-3, -2)) 
-    original_kspace_fni = transforms.normalize(original_kspace, mean, std, eps=1e-11)
-    return original_kspace_fni
-
-def mnormalize(masked_kspace):
-    #getting image from masked data
-    image = transforms.ifft2(masked_kspace)
-    #normalizing the image
-    nimage, mean, std = transforms.normalize_instance(image, eps=1e-11)
-    #getting kspace data from normalized image
-    maksed_kspace_fni = transforms.ifftshift(nimage, dim=(-3, -2))
-    maksed_kspace_fni = torch.fft(maksed_kspace_fni, 2)
-    maksed_kspace_fni = transforms.fftshift(maksed_kspace_fni, dim=(-3, -2))
-    maksed_kspace_fni, mean, std = transforms.normalize_instance(masked_kspace, eps=1e-11)
-    return maksed_kspace_fni,mean,std
-
-def nkspacetoimage(args, kspace_fni, mean, std, eps=1e-11):
-    #nkspace to image
-    assert kspace_fni.size(-1) == 2
-    image = transforms.ifftshift(kspace_fni, dim=(-3, -2))
-    image = torch.ifft(image, 2)
-    image = transforms.fftshift(image, dim=(-3, -2))
-    #denormalizing the nimage
-    image = (image * std)+mean
-    image = image[0]
-    
-    image = transforms.complex_center_crop(image, (args.resolution, args.resolution))
-    # Absolute value
-    image = transforms.complex_abs(image)
-    # Normalize input
-    image, mean, std = transforms.normalize_instance(image, eps=1e-11)
-    image = image.clamp(-6, 6)
-    return image
-
-def normalize(data):
+def normalize(data,divisor = None):
     a = np.array(data[0,:,:,0])**2 + np.array(data[0,:,:,1])**2
-    divisor = math.sqrt(a.max())
+    if divisor is None:
+        divisor = math.sqrt(a.max())
     data = data/divisor
     return data,divisor
 
-def save_model(args, exp_dir, epoch, model, optimizer, best_dev_loss, is_new_best):
+def imagenormalize(data, divisor=None):
+    """kspace generated by normalizing image space"""
+    #getting image from masked data
+    image = transforms.ifft2(data)
+    #normalizing the image
+    nimage,divisor = normalize(image,divisor)
+    #getting kspace data from normalized image
+    data = transforms.ifftshift(image, dim=(-3, -2))
+    data = torch.fft(data, 2)
+    data = transforms.fftshift(data, dim=(-3, -2)) 
+    return data,divisor
+
+def save_model(args, exp_dir, epoch, encoder,deocoder, optimizer, best_dev_loss, is_new_best,state):
     torch.save(
         {
             'epoch': epoch,
             'args': args,
-            'model': model.state_dict(),
+            'model': [encoder.state_dict(),deocoder.state_dict()],
             'optimizer': optimizer.state_dict(),
             'best_val_loss': best_dev_loss,
-            'exp_dir': exp_dir
+            'exp_dir': exp_dir,
+            'state' : state
         },
         f=exp_dir + '/model.pt'
     )
     if is_new_best:
         shutil.copyfile(exp_dir + '/model.pt', exp_dir + '/best_model.pt')
-    
-def load_model(checkpoint_file, model):
+
+def load_model(checkpoint_file):
+    print(checkpoint_file)
     checkpoint = torch.load(checkpoint_file)
     args = checkpoint['args']
-    autoencoder = model
-    autoencoder.load_state_dict(checkpoint['model'])
-    optimizer = torch.optim.Adam(autoencoder.parameters(), lr=args.learning_rate)
+    encoder = Encoder().cuda()
+    decoder = Decoder().cuda()
+    encoder.load_state_dict(checkpoint['model'][0])
+    decoder.load_state_dict(checkpoint['model'][1])
+    parameters = list(encoder.parameters())+ list(decoder.parameters())
+    optimizer = torch.optim.Adam(parameters, lr=args.learning_rate)
     optimizer.load_state_dict(checkpoint['optimizer'])
-    return checkpoint, autoencoder, optimizer
+    return checkpoint, encoder, decoder, optimizer
