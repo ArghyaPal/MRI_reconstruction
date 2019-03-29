@@ -24,7 +24,7 @@ from anet_model import AnetModel
 from args import get_args
 
 args = get_args()
-train_loader, dev_loader = utils.create_data_loaders(args)    
+train_loader, dev_loader = utils.create_data_loaders(args, limit = 4)
 
 # ### Custom dataset class
 
@@ -38,19 +38,19 @@ def build_model(args):
     ).to(args.device)
     return model
 
-def build_optim(args, params):
-    optimizer = torch.optim.RMSprop(params, args.learning_rate, weight_decay=args.weight_decay)
-    return optimizer
+# def build_optim(args, params):
+#     optimizer = torch.optim.RMSprop(params, args.learning_rate, weight_decay=args.weight_decay)
+#     return optimizer
 
-def load_model(checkpoint_file):
-    checkpoint = torch.load(checkpoint_file)
-    args = checkpoint['args']
-    model = build_model(args)
-    model.load_state_dict(checkpoint['model'])
+# def load_model(checkpoint_file):
+#     checkpoint = torch.load(checkpoint_file)
+#     args = checkpoint['args']
+#     model = build_model(args)
+#     model.load_state_dict(checkpoint['model'])
 
-    optimizer = build_optim(args, model.parameters())
-    optimizer.load_state_dict(checkpoint['optimizer'])
-    return checkpoint, model, optimizer
+#     optimizer = build_optim(args, model.parameters())
+#     optimizer.load_state_dict(checkpoint['optimizer'])
+#     return checkpoint, model, optimizer
 
 # ### Image normalized
 
@@ -64,7 +64,7 @@ print('Total number of training iterations: ',len(train_loader))
 print('Total number of validation iterations: ',len(dev_loader))
 
 if args.resume:
-    checkpoint, model, optimizer = load_model(args.checkpoint)
+    checkpoint, model, optimizer = utils.load_model(args.checkpoint, build_model(args))
     best_dev_loss = checkpoint['best_dev_loss']
     start_epoch = checkpoint['epoch']
     if checkpoint['state']=='train':
@@ -74,7 +74,7 @@ else:
     model = build_model(args)
     # if args.data_parallel:
         # model = torch.nn.DataParallel(model)
-    optimizer = build_optim(args, model.parameters())
+    optimizer = utils.build_optim(args, model.parameters())
     best_dev_loss = 1e9
     start_epoch = 0
     train = True
@@ -105,46 +105,42 @@ for i in range(start_epoch, args.epoch):
         total_loss = 0.0
         model.train()
         for j, data in enumerate(train_loader):
+            print(i, j)
             original_kspace, masked_kspace, mask, target, fname, slice_index = data
-            #normalizing the kspace
-            nmasked_kspace,mdivisor = utils.imagenormalize(masked_kspace)
-            noriginal_kspace,odivisor = utils.imagenormalize(original_kspace,mdivisor)
 
-            #transforming the input according to dimension and type 
-            noriginal_kspace,nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
-            nmasked_kspace = Variable(nmasked_kspace).cuda()
-            noriginal_kspace = Variable(noriginal_kspace).cuda()
+            # normalizing the kspace
+            nmasked_kspace, mdivisor = utils.normalize(masked_kspace)
+            noriginal_kspace, odivisor = utils.normalize(original_kspace, mdivisor)
 
-            #setting up all the gradients to zero
-            optimizer.zero_grad()
+            # transforming the input according to dimension and type 
+            noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
+
+
+            nmasked_kspace = Variable(nmasked_kspace).to(args.device)
+            noriginal_kspace = Variable(noriginal_kspace).to(args.device)
             
-            #forward pass
+            # forward pass
             outputkspace = model(nmasked_kspace)
             
-            #finding the kspace loss
-            loss1 = loss_func(outputkspace, noriginal_kspace)
+            # finding the kspace loss
+            loss = loss_func(outputkspace, noriginal_kspace)
             
-            # finding the corresponding images
-            # print(noriginal_kspace.shape)
-            original_3d_image = torch.tensor(transforms.ifft2(utils.transformback(noriginal_kspace)), requires_grad=True)
-            output_3d_image = torch.tensor(transforms.ifft2(utils.transformback(outputkspace)), requires_grad=True)
-            
-            #finding the image loss
-            loss2 = loss_func(original_3d_image, output_3d_image)
-            
+            # setting up all the gradients to zero
+            optimizer.zero_grad()
+
             #backward pass
-            (loss1 + loss2).backward()
-            
+            loss.backward()
             optimizer.step()
-            total_loss += loss1.data.item() + loss2.data.item()
+
+            total_loss += loss.data.item()
             if j % 100 == 0:
                 avg_loss = total_loss/(j+1)
-                print('Avg training loss: ',avg_loss,' Training loss: ',loss1.data.item() + loss2.data.item(), ' iteration :', j+1)
+                print('Avg training loss: ',avg_loss,' Training loss: ',loss.data.item(), ' iteration :', j+1)
                 if j % 500 == 0:
                     utils.compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,global_step + j+1, 0)
 
-            writer.add_scalar('TrainLoss', loss1.data.item() + loss2.data.item(), global_step + j+1)
-        utils.save_model(args, args.exp_dir, i+1 , encoder,decoder, optimizer, best_val_loss, False, 'train')    
+            writer.add_scalar('TrainLoss', loss.data.item() , global_step + j+1)
+        utils.save_model(args, args.exp_dir, i+1 , model, optimizer, best_val_loss, False, 'train')    
         train_loss.append(total_loss/len(train_loader))
     train = True
     
@@ -152,24 +148,26 @@ for i in range(start_epoch, args.epoch):
     print("Validation Phase")
     # validation loss
     total_val_loss = 0.0
-    encoder.eval()
-    decoder.eval()
+    model.eval()
     for j,data in enumerate(dev_loader):
-        original_kspace,masked_kspace, mask = data
-        #normalizing the kspace
-        nmasked_kspace,mdivisor = imagenormalize(masked_kspace)
-        noriginal_kspace,odivisor = imagenormalize(original_kspace)
+        original_kspace, masked_kspace, mask, target, fname, slice_index = data
+
+        # normalizing the kspace
+        nmasked_kspace, mdivisor = utils.normalize(masked_kspace)
+        noriginal_kspace, odivisor = utils.normalize(original_kspace, mdivisor)
+
+        # transforming the input according to dimension and type 
+        noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
+
+
+        nmasked_kspace = Variable(nmasked_kspace).to(args.device)
+        noriginal_kspace = Variable(noriginal_kspace).to(args.device)
+
         
-        #transforming the input according dimention and type 
-        noriginal_kspace,nmasked_kspace = transformshape(noriginal_kspace), transformshape(nmasked_kspace)
-        nmasked_kspace = Variable(nmasked_kspace).cuda()
-        noriginal_kspace = Variable(noriginal_kspace).cuda()
+        # forward pass
+        outputkspace = model(nmasked_kspace)
         
-        #forward pass
-        latent = encoder(nmasked_kspace)
-        outputkspace = decoder(latent)
-        
-        #finding the loss
+        # finding the kspace loss
         loss = loss_func(outputkspace, noriginal_kspace)
         
         total_val_loss += loss.data.item()
@@ -188,5 +186,5 @@ for i in range(start_epoch, args.epoch):
     is_new_best = valid_loss[-1] < best_val_loss
     best_val_loss = min(best_val_loss, valid_loss[-1])
     print("best val loss :",best_val_loss)
-    utils.save_model(args, args.exp_dir, i+1 , encoder,decoder, optimizer, best_val_loss, is_new_best, 'valid')    
+    utils.save_model(args, args.exp_dir, i+1, model, optimizer, best_val_loss, is_new_best, 'valid')    
 writer.close()

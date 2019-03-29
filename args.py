@@ -24,6 +24,7 @@ def get_args():
     parser.add_argument('--num-chans', type=int, default=32, help='Number of U-Net channels')
     parser.add_argument('--num-pools', type=int, default=4, help='Number of U-Net pooling layers')
     parser.add_argument('--drop-prob', type=float, default=0.0, help='Dropout probability')
+    parser.add_argument('--non-zero-ratio', type=float, default=0.0, help='Minimum percentage of non-zero values allowed')
     parser.add_argument('--weight-decay', type=float, default=0., help='Strength of weight decay regularization')
     parser.add_argument('--reduce', type=bool, default=True, help='Whether to reduce kspace to size 320x320')
     parser.add_argument('--out-dir', type=pathlib.Path, default=pathlib.Path("output"), help='Name of the directory to store the output')

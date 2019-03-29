@@ -65,7 +65,7 @@ class SliceData(Dataset):
     A PyTorch Dataset that provides access to MR image slices.
     """
 
-    def __init__(self, root, transform, challenge, sample_rate=1):
+    def __init__(self, root, transform, challenge, sample_rate=1, non_zero_ratio = 0.0, limit = -1):
         """
         Args:
             root (pathlib.Path): Path to the dataset.
@@ -81,8 +81,9 @@ class SliceData(Dataset):
             raise ValueError('challenge should be either "singlecoil" or "multicoil"')
 
         self.transform = transform
-        self.recons_key = 'reconstruction_esc' if challenge == 'singlecoil'             else 'reconstruction_rss'
+        self.recons_key = 'reconstruction_esc' if challenge == 'singlecoil' else 'reconstruction_rss'
         self.challenge = challenge
+        self.non_zero_ratio = non_zero_ratio
 
         self.examples = []
         files = list(pathlib.Path(root).iterdir())
@@ -91,9 +92,29 @@ class SliceData(Dataset):
             num_files = round(len(files) * sample_rate)
             files = files[:num_files]
         for fname in sorted(files):
-            kspace = h5py.File(fname, 'r')['kspace']
+            f = h5py.File(fname, 'r')
+            kspace = f['kspace']
+            slices = f[self.recons_key]
             num_slices = kspace.shape[0]
-            self.examples += [(fname, slice) for slice in range(num_slices)]
+            slice_size = np.prod(slices[0].shape)
+            
+
+            if limit > 0 and len(self.examples) > limit:
+                self.examples = self.examples[0:10]
+                break
+            
+            for slice in range(num_slices):
+                if non_zero_ratio > 0.0:
+                    non_zero_percentage = np.count_nonzero(slices[slice])/slice_size
+                else:
+                    non_zero_percentage = 1.0
+
+                if (non_zero_percentage > non_zero_ratio):
+                    self.examples += [(fname, slice)]
+                else:
+                    print("Ignoring index: ", slice, " of file: ", fname, " with non zero ratio of ", non_zero_percentage)
+
+
 
     def __len__(self):
         return len(self.examples)
@@ -103,6 +124,7 @@ class SliceData(Dataset):
         with h5py.File(fname, 'r') as data:
             kspace = data['kspace'][slice]
             target = data[self.recons_key][slice] if self.recons_key in data else None
+
             return self.transform(kspace, target, self.challenge, fname.name, slice)
 
 
@@ -153,7 +175,7 @@ class DataTransform:
 
 from common.subsample import MaskFunc
 from torch.utils.data import DataLoader
-def create_datasets(args):
+def create_datasets(args, limit = -1):
     train_mask = MaskFunc(args.center_fractions, args.accelerations)
     dev_mask = MaskFunc(args.center_fractions, args.accelerations)
 
@@ -161,19 +183,23 @@ def create_datasets(args):
         root= args.data_path + '/singlecoil_train',
         transform=DataTransform(train_mask, args.resolution, args.reduce),
         sample_rate=args.sample_rate,
-        challenge=args.challenge
+        challenge=args.challenge,
+        non_zero_ratio = args.non_zero_ratio,
+        limit = limit
     )
     dev_data = SliceData(
         root= args.data_path + '/singlecoil_val',
         transform=DataTransform(dev_mask, args.resolution, args.reduce, use_seed=True),
         sample_rate=args.sample_rate,
         challenge=args.challenge,
+        non_zero_ratio = args.non_zero_ratio,
+        limit = limit
     )
     return dev_data, train_data
 
 
-def create_data_loaders(args, if_shuffle = True):
-    dev_data, train_data = create_datasets(args)
+def create_data_loaders(args, if_shuffle = True, limit = -1):
+    dev_data, train_data = create_datasets(args, limit = limit)
     
     train_loader = DataLoader(
         dataset=train_data,
@@ -225,12 +251,12 @@ def plotimage(image):
     
 def transformshape(kspace):
     s = kspace.shape
-    kspace = torch.reshape(kspace , (s[0],s[3],s[1],s[2]))
+    kspace = torch.reshape(kspace, (s[0],s[3],s[1],s[2]))
     return kspace
 
 def transformback(kspace):
     s = kspace.shape
-    kspace = torch.reshape(kspace , (s[0],s[2],s[3],s[1]))
+    kspace = torch.reshape(kspace, (s[0],s[2],s[3],s[1]))
     return kspace
 
 def mse(imageA, imageB):
@@ -263,7 +289,6 @@ def compare_images(imageA, imageB,imageC,writer,iteration):
     plt.imshow(imageC)
     plt.axis("off")
     
-    plt.show()
     writer.add_figure('Comparision', fig, global_step = iteration)    
 
 def compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,iteration,index):
@@ -278,53 +303,76 @@ def compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,it
     imageC = np.array(kspaceto2dimage(masked_kspace.data.cpu()))[index]
     compare_images(imageA,imageB,imageC,writer,iteration)
 
-def normalize(data,divisor = None):
-    a = np.array(data[0,:,:,0])**2 + np.array(data[0,:,:,1])**2
+def normalize(data, divisor = None):
+    assert data.shape[-1] == 2
+    norms = np.linalg.norm(data, axis = -1)
+
+    if divisor is None:
+        divisor = np.max(norms, axis = (1, 2))
+        divisor = torch.stack(
+                [torch.Tensor(divisor), torch.Tensor(divisor)], dim=-1).reshape(
+                    shape=data.shape[:-3] + (1,1,2)
+                )
+
+    return torch.div(data, divisor), divisor
+"""     a = np.array(data[0,:,:,0])**2 + np.array(data[0,:,:,1])**2
     if divisor is None:
         divisor = math.sqrt(a.max())
     data = data/divisor
     return data,divisor
+ """
+
+def standardize(data):
+    assert data.shape[-1] == 2
+
+    mean = np.mean(np.array(data), axis=(-3,-2)).reshape(data.shape[:-3] + (1,1,2))
+    std = np.std(np.array(data), axis=(-3,-2)).reshape(data.shape[:-3] + (1,1,2))
+
+    return (data - mean)/std, mean, std
 
 def imagenormalize(data, divisor=None):
     """kspace generated by normalizing image space"""
     #getting image from masked data
     image = transforms.ifft2(data)
     #normalizing the image
-    nimage,divisor = normalize(image,divisor)
+    nimage, divisor = normalize(image, divisor)
     #getting kspace data from normalized image
     data = transforms.ifftshift(image, dim=(-3, -2))
     data = torch.fft(data, 2)
     data = transforms.fftshift(data, dim=(-3, -2)) 
     return data,divisor
 
-def save_model(args, exp_dir, epoch, encoder,deocoder, optimizer, best_dev_loss, is_new_best,state):
+def save_model(args, exp_dir, epoch, model, optimizer, best_dev_loss, is_new_best, state):
     torch.save(
         {
             'epoch': epoch,
             'args': args,
-            'model': [encoder.state_dict(),deocoder.state_dict()],
+            'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'best_val_loss': best_dev_loss,
+            'best_dev_loss': best_dev_loss,
             'exp_dir': exp_dir,
             'state' : state
         },
-        f=exp_dir + '/model.pt'
+        f = exp_dir + "/model.pt"
     )
     if is_new_best:
         shutil.copyfile(exp_dir + '/model.pt', exp_dir + '/best_model.pt')
 
-def load_model(checkpoint_file):
-    print(checkpoint_file)
+def build_optim(args, params):
+    optimizer = torch.optim.RMSprop(params, args.learning_rate, weight_decay=args.weight_decay)
+    return optimizer
+
+
+def load_model(checkpoint_file, model):
     checkpoint = torch.load(checkpoint_file)
     args = checkpoint['args']
-    encoder = Encoder().cuda()
-    decoder = Decoder().cuda()
-    encoder.load_state_dict(checkpoint['model'][0])
-    decoder.load_state_dict(checkpoint['model'][1])
-    parameters = list(encoder.parameters())+ list(decoder.parameters())
-    optimizer = torch.optim.Adam(parameters, lr=args.learning_rate)
+    if args.data_parallel:
+        model = torch.nn.DataParallel(model)
+    model.load_state_dict(checkpoint['model'])
+
+    optimizer = build_optim(args, model.parameters())
     optimizer.load_state_dict(checkpoint['optimizer'])
-    return checkpoint, encoder, decoder, optimizer
+    return checkpoint, model, optimizer
 
 def save_tensors(tensors_dict, out_dir, fname):
     out_dir.mkdir(exist_ok=True)
