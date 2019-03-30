@@ -288,7 +288,7 @@ def mse(imageA, imageB):
     err /= float(imageA.shape[0] * imageA.shape[1])
     return err
 
-def compare_images(imageA, imageB,imageC,writer,iteration):
+def compare_images(imageA, imageB, imageC, imageD, imageE, writer,iteration):
     mb = mse(imageA, imageB)
     sb = ssim(imageA, imageB)
     mc = mse(imageA, imageC)
@@ -297,39 +297,55 @@ def compare_images(imageA, imageB,imageC,writer,iteration):
     fig = plt.figure()
     plt.suptitle("Target vs network MSE: %.2f, SSIM: %.2f" % (mb, sb)+" Target vs Zeroimputed MSE: %.2f, SSIM: %.2f" % (mc, sc))
      
-    ax = fig.add_subplot(2, 2, 1)
+    ax = fig.add_subplot(3, 2, 1)
     plt.imshow(imageA)
     plt.axis("off")
 
-    ax = fig.add_subplot(2, 2, 2)
+    ax = fig.add_subplot(3, 2, 2)
     plt.imshow(imageB)
     plt.axis("off")
     
-    ax = fig.add_subplot(2, 2, 3)
+    ax = fig.add_subplot(3, 2, 3)
     plt.imshow(imageA)
     plt.axis("off")
 
-    ax = fig.add_subplot(2, 2, 4)
+    ax = fig.add_subplot(3, 2, 4)
     plt.imshow(imageC)
     plt.axis("off")
+
+    ax = fig.add_subplot(3, 2, 5)
+    plt.imshow(imageD)
+    plt.axis("off")
     
-    writer.add_figure('Comparision', fig, global_step = iteration)    
-
-def compareimageoutput(original_kspace, masked_kspace, outputkspace, mask, writer, iteration, index, polar):
-    assert original_kspace.size(-1) == 2
-    assert masked_kspace.size(-1) == 2
-    assert outputkspace.size(-3) == 2
-
+    ax = fig.add_subplot(3, 2, 6)
+    plt.imshow(imageE)
+    plt.axis("off")
+    
+    writer.add_figure('Comparison', fig, global_step = iteration)    
+def find_unmask(mask):
     unmask = np.where(mask==1.0, 0.0, 1.0)
     unmask = transforms.to_tensor(unmask)
     unmask = unmask.float()
-    output = transformback(outputkspace.data.cpu())
+    return unmask
+
+def compareimageoutput(original_kspace, masked_kspace, output_kspace, mask, writer, iteration, index, polar):
+    assert original_kspace.size(-1) == 2
+    assert masked_kspace.size(-1) == 2
+    assert output_kspace.size(-3) == 2
+
+    unmask = find_unmask(mask)
+
+    output = transformback(output_kspace.data.cpu())
+
     output = output * unmask
+    imageD = np.array(kspaceto2dimage(output, polar)[index])
+    imageE = np.array(kspaceto2dimage(original_kspace * unmask, polar)[index])
+
     output = output + masked_kspace.data.cpu()
     imageA = np.array(kspaceto2dimage(original_kspace.data.cpu(), polar))[index]
     imageB = np.array(kspaceto2dimage(output, polar))[index]
     imageC = np.array(kspaceto2dimage(masked_kspace.data.cpu(), polar))[index]
-    compare_images(imageA,imageB,imageC,writer,iteration)
+    compare_images(imageA, imageB, imageC, imageD, imageE, writer,iteration)
 
 def unitize(data, divisor = None):
     assert data.shape[-1] == 2
