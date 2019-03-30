@@ -24,7 +24,7 @@ from anet_model import AnetModel
 from args import get_args
 
 args = get_args()
-train_loader, dev_loader = utils.create_data_loaders(args)
+train_loader, dev_loader = utils.create_data_loaders(args, limit = 4)
 
 # ### Custom dataset class
 
@@ -128,12 +128,11 @@ for i in range(start_epoch, args.epoch):
             optimizer.zero_grad()
 
             #backward pass
-            (loss_kspace + 2.0*loss_image).backward()
+            (loss_kspace + 3.0*loss_image).backward()
             optimizer.step()
 
             total_loss_kspace += loss_kspace.data.item()
             total_loss_image += loss_image.data.item()
-            import pdb; pdb.set_trace()
             if j % 100 == 0:
                 avg_loss_kspace, avg_loss_image = total_loss_kspace/(j + 1), total_loss_image/(j + 1)
                 print(j+1, ': AVG TRAINING LOSS: Kspace:', avg_loss_kspace, 'Image', avg_loss_image, 'ITR LOSS: Kspace', loss_kspace.data.item(), 'Image', loss_image.data.item())
@@ -170,7 +169,7 @@ for i in range(start_epoch, args.epoch):
         
         # finding the kspace loss
         loss_kspace = loss_func(outputkspace, noriginal_kspace)
-        loss_image = loss_func(utils.kspaceto2dimage(utils.transformback(outputkspace)), utils.kspaceto2dimage(utils.transformback(noriginal_kspace)))
+        loss_image = loss_func(utils.kspaceto2dimage(utils.transformback(outputkspace), args.polar), utils.kspaceto2dimage(utils.transformback(noriginal_kspace), args.polar))
 
         loss_itr = loss_kspace.data.item() + loss_image.data.item()
         

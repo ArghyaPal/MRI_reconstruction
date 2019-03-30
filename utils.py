@@ -26,14 +26,16 @@ def cartesianToPolar(input):
     return torch.Tensor(polar)
 
 def polarToCartesian(input):
-    output = np.zeros(input.shape[:-1], dtype=np.complex64)
-    it = np.nditer(output, flags=['multi_index'])
+    return torch.stack([torch.mul(input[...,0], torch.cos(input[...,1])), torch.mul(input[...,0], torch.sin(input[...,1]))], dim=-1)
 
-    while not it.finished:
-        output[it.multi_index] = cmath.rect(input[it.multi_index][0], input[it.multi_index][1])
-        temp = it.iternext()
+    # output = np.zeros(input.shape[:-1], dtype=np.complex64)
+    # it = np.nditer(output, flags=['multi_index'])
+
+    # while not it.finished:
+    #     output[it.multi_index] = cmath.rect(input[it.multi_index][0], input[it.multi_index][1])
+    #     temp = it.iternext()
     
-    return torch.Tensor(np.stack([output.real, output.imag], axis = -1))
+    # return torch.Tensor(np.stack([output.real, output.imag], axis = -1))
 
 
 
@@ -113,8 +115,8 @@ class SliceData(Dataset):
             else:
                 self.examples += [(fname, slice) for slice in range(num_slices)]
             
-            if limit > 0:
-                self.examples = self.examples[0:limit]
+        if limit > 0:
+            self.examples = self.examples[0:limit]
 
 
     def __len__(self):
