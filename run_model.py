@@ -24,7 +24,7 @@ from anet_model import AnetModel
 from args import get_args
 
 args = get_args()
-train_loader, dev_loader = utils.create_data_loaders(args, limit = 4)
+train_loader, dev_loader = utils.create_data_loaders(args)
 
 # ### Custom dataset class
 
@@ -64,7 +64,7 @@ print('Total number of training iterations: ',len(train_loader))
 print('Total number of validation iterations: ',len(dev_loader))
 
 if args.resume:
-    checkpoint, model, optimizer = utils.load_model(args.checkpoint, build_model(args))
+    checkpoint, model, optimizer = utils.load_model(args.exp_dir + "/best_model.pt", build_model(args))
     best_dev_loss = checkpoint['best_dev_loss']
     start_epoch = checkpoint['epoch']
     if checkpoint['state']=='train':
@@ -102,46 +102,49 @@ for i in range(start_epoch, args.epoch):
     ##########################################TRAINING PHASE######################################################
     if train:
         print("Training Phase")
-        total_loss = 0.0
+        total_loss_kspace = total_loss_image = 0.0
         model.train()
         for j, data in enumerate(train_loader):
-            print(i, j)
             original_kspace, masked_kspace, mask, target, fname, slice_index = data
 
             # normalizing the kspace
-            nmasked_kspace, mdivisor = utils.normalize(masked_kspace)
-            noriginal_kspace, odivisor = utils.normalize(original_kspace, mdivisor)
+            nmasked_kspace, mean, std = utils.standardize(masked_kspace)
+            noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
 
             # transforming the input according to dimension and type 
             noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
-
 
             nmasked_kspace = Variable(nmasked_kspace).to(args.device)
             noriginal_kspace = Variable(noriginal_kspace).to(args.device)
             
             # forward pass
             outputkspace = model(nmasked_kspace)
-            
+
             # finding the kspace loss
-            loss = loss_func(outputkspace, noriginal_kspace)
-            
+            loss_kspace = loss_func(outputkspace, noriginal_kspace)
+            loss_image = loss_func(utils.kspaceto2dimage(utils.transformback(outputkspace)), utils.kspaceto2dimage(utils.transformback(noriginal_kspace)))
+
             # setting up all the gradients to zero
             optimizer.zero_grad()
 
             #backward pass
-            loss.backward()
+            (loss_kspace + loss_image).backward()
             optimizer.step()
 
-            total_loss += loss.data.item()
-            if j % 100 == 0:
-                avg_loss = total_loss/(j+1)
-                print('Avg training loss: ',avg_loss,' Training loss: ',loss.data.item(), ' iteration :', j+1)
-                if j % 500 == 0:
-                    utils.compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,global_step + j+1, 0)
+            total_loss_kspace += loss_kspace.data.item()
+            total_loss_image += loss_image.data.item()
 
-            writer.add_scalar('TrainLoss', loss.data.item() , global_step + j+1)
+            if j % 100 == 0:
+                avg_loss_kspace, avg_loss_image = total_loss_kspace/(j + 1), total_loss_image/(j + 1)
+                print(j+1, ': AVG TRAINING LOSS: Kspace:', avg_loss_kspace, 'Image', avg_loss_image, 'ITR LOSS: Kspace', loss_kspace.data.item(), 'Image', loss_image.data.item())
+
+                if j % 500 == 0:
+                    utils.compareimageoutput(original_kspace, masked_kspace, outputkspace, mask, writer, global_step + j + 1, 0)
+
+            writer.add_scalar('TrainKspaceLoss', loss_kspace.data.item(), global_step + j+1)
+            writer.add_scalar('TrainImageLoss', loss_image.data.item(), global_step + j+1)
         utils.save_model(args, args.exp_dir, i+1 , model, optimizer, best_val_loss, False, 'train')    
-        train_loss.append(total_loss/len(train_loader))
+        # train_loss.append(total_loss_kspace/len(train_loader))
     train = True
     
     ################################VALIDATION#######################################################
@@ -153,32 +156,33 @@ for i in range(start_epoch, args.epoch):
         original_kspace, masked_kspace, mask, target, fname, slice_index = data
 
         # normalizing the kspace
-        nmasked_kspace, mdivisor = utils.normalize(masked_kspace)
-        noriginal_kspace, odivisor = utils.normalize(original_kspace, mdivisor)
+        nmasked_kspace, mean, std = utils.standardize(masked_kspace)
+        noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
 
         # transforming the input according to dimension and type 
         noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
 
-
         nmasked_kspace = Variable(nmasked_kspace).to(args.device)
         noriginal_kspace = Variable(noriginal_kspace).to(args.device)
-
         
         # forward pass
         outputkspace = model(nmasked_kspace)
         
         # finding the kspace loss
-        loss = loss_func(outputkspace, noriginal_kspace)
+        loss_kspace = loss_func(outputkspace, noriginal_kspace)
+        loss_image = loss_func(utils.kspaceto2dimage(utils.transformback(outputkspace)), utils.kspaceto2dimage(utils.transformback(noriginal_kspace)))
+
+        loss_itr = loss_kspace.data.item() + loss_image.data.item()
         
-        total_val_loss += loss.data.item()
+        total_val_loss += loss_itr
         
         if j % 100 == 0:
             avg_loss = total_val_loss/(j+1)
-            print('Avg Validation loss: ',avg_loss,' Validation loss: ',loss.data.item(), ' iteration :', j+1, 0)
+            print(j+1, ': AVG VALIDATION LOSS:', avg_loss, 'ITR LOSS:', loss_itr)
             if j % 200 == 0:
                 utils.compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,global_step + j+1, 0)
         
-        writer.add_scalar('ValidationLoss', loss.data.item(), global_step + j+1)
+        writer.add_scalar('ValidationLoss', loss_itr, global_step + j+1)
         
     valid_loss.append(total_val_loss / len(dev_loader))
     
