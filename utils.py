@@ -2,29 +2,6 @@ import numpy as np
 import cmath
 import math
 import shutil
-
-def cartesianToPolar(input):
-    if input.dtype != 'complex64':
-        magnitude = input.norm(dim=-1)
-        phase = torch.atan(torch.div(input[...,0], input[...,1]))
-        phase[torch.isnan(phase)] = 0.0
-        return np.stack([magnitude, phase], axis=-1)
-    else:
-        magnitude = np.vectorize(np.linalg.norm)
-        phase = np.vectorize(np.angle)        
-        return np.stack([magnitude(input), phase(input)], axis=-1)
-
-
-def polarToCartesian(input):
-    output = np.zeros(input.shape[:-1], dtype=np.complex64)
-    it = np.nditer(output, flags=['multi_index'])
-
-    while not it.finished:
-        output[it.multi_index] = cmath.rect(input[it.multi_index][0], input[it.multi_index][1])
-        temp = it.iternext()
-    
-    return np.stack([output.real, output.imag], axis = -1)
-
 import torch
 import torch.cuda as cuda
 import torch.nn as nn
@@ -34,6 +11,30 @@ from torch.nn import functional as F
 from skimage.measure import compare_ssim as ssim
 from sklearn import preprocessing
 import matplotlib.pyplot as plt
+
+def cartesianToPolar(input):
+    polar = None
+    if input.dtype != 'complex64':
+        magnitude = input.norm(dim=-1)
+        phase = torch.atan(torch.div(input[...,0], input[...,1]))
+        phase[torch.isnan(phase)] = 0.0
+        polar = np.stack([magnitude, phase], axis=-1)
+    else:
+        magnitude = np.vectorize(np.linalg.norm)
+        phase = np.vectorize(np.angle)        
+        polar = np.stack([magnitude(input), phase(input)], axis=-1)
+    return torch.Tensor(polar)
+
+def polarToCartesian(input):
+    output = np.zeros(input.shape[:-1], dtype=np.complex64)
+    it = np.nditer(output, flags=['multi_index'])
+
+    while not it.finished:
+        output[it.multi_index] = cmath.rect(input[it.multi_index][0], input[it.multi_index][1])
+        temp = it.iternext()
+    
+    return torch.Tensor(np.stack([output.real, output.imag], axis = -1))
+
 
 
 # ### Setting up the arguments
@@ -248,7 +249,10 @@ def croppedimage(kspace, resolution):
     image = transforms.complex_center_crop(image, (resolution, resolution))
     return image
 
-def kspaceto2dimage(kspace, cropping = False, resolution = None):
+def kspaceto2dimage(kspace, polar, cropping = False, resolution = None):
+    if polar:
+        kspace = polarToCartesian(kspace)
+
     if cropping:
         if not resolution:
             raise Exception("If cropping = True, pass the value for resolution for the function: kspaceto2dimage")
@@ -309,16 +313,20 @@ def compare_images(imageA, imageB,imageC,writer,iteration):
     
     writer.add_figure('Comparision', fig, global_step = iteration)    
 
-def compareimageoutput(original_kspace,masked_kspace,outputkspace,mask,writer,iteration,index):
+def compareimageoutput(original_kspace, masked_kspace, outputkspace, mask, writer, iteration, index, polar):
+    assert original_kspace.size(-1) == 2
+    assert masked_kspace.size(-1) == 2
+    assert outputkspace.size(-3) == 2
+
     unmask = np.where(mask==1.0, 0.0, 1.0)
     unmask = transforms.to_tensor(unmask)
     unmask = unmask.float()
     output = transformback(outputkspace.data.cpu())
     output = output * unmask
     output = output + masked_kspace.data.cpu()
-    imageA = np.array(kspaceto2dimage(original_kspace.data.cpu()))[index]
-    imageB = np.array(kspaceto2dimage(output))[index]
-    imageC = np.array(kspaceto2dimage(masked_kspace.data.cpu()))[index]
+    imageA = np.array(kspaceto2dimage(original_kspace.data.cpu(), polar))[index]
+    imageB = np.array(kspaceto2dimage(output, polar))[index]
+    imageC = np.array(kspaceto2dimage(masked_kspace.data.cpu(), polar))[index]
     compare_images(imageA,imageB,imageC,writer,iteration)
 
 def unitize(data, divisor = None):
