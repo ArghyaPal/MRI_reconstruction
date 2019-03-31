@@ -16,7 +16,7 @@ def cartesianToPolar(input):
     polar = None
     if input.dtype != 'complex64':
         magnitude = input.norm(dim=-1)
-        phase = torch.atan(torch.div(input[...,0], input[...,1]))
+        phase = torch.atan2(input[...,1], input[...,0])
         phase[torch.isnan(phase)] = 0.0
         polar = np.stack([magnitude, phase], axis=-1)
     else:
