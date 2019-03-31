@@ -24,7 +24,7 @@ from anet_model import AnetModel
 from args import get_args
 
 args = get_args()
-train_loader, dev_loader = utils.create_data_loaders(args, limit = 4)
+train_loader, dev_loader = utils.create_data_loaders(args)
 
 # ### Custom dataset class
 
@@ -107,9 +107,13 @@ for i in range(start_epoch, args.epoch):
         for j, data in enumerate(train_loader):
             original_kspace, masked_kspace, mask, target, fname, slice_index = data
 
-            # normalizing the kspace
-            nmasked_kspace, mean, std = utils.standardize(masked_kspace)
-            noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
+            # preprocessing the kspace (input)
+            if args.preprocess == "unitize":
+                nmasked_kspace, divisor = utils.unitize(masked_kspace)
+                noriginal_kspace, divisor = utils.unitize(original_kspace, divisor)
+            elif args.preprocess == "standardize":
+                nmasked_kspace, mean, std = utils.standardize(masked_kspace)
+                noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
 
             # transforming the input according to dimension and type 
             noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
@@ -139,7 +143,6 @@ for i in range(start_epoch, args.epoch):
 
                 if j % 500 == 0:
                     utils.compareimageoutput(original_kspace, masked_kspace, outputkspace, mask, writer, global_step + j + 1, 0, args.polar)
-
             writer.add_scalar('TrainKspaceLoss', loss_kspace.data.item(), global_step + j+1)
             writer.add_scalar('TrainImageLoss', loss_image.data.item(), global_step + j+1)
         utils.save_model(args, args.exp_dir, i+1 , model, optimizer, best_val_loss, False, 'train')    
@@ -154,9 +157,13 @@ for i in range(start_epoch, args.epoch):
     for j,data in enumerate(dev_loader):
         original_kspace, masked_kspace, mask, target, fname, slice_index = data
 
-        # normalizing the kspace
-        nmasked_kspace, mean, std = utils.standardize(masked_kspace)
-        noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
+        # preprocessing the kspace (input)
+        if args.preprocess == "unitize":
+            nmasked_kspace, divisor = utils.unitize(masked_kspace)
+            noriginal_kspace, divisor = utils.unitize(original_kspace, divisor)
+        elif args.preprocess == "standardize":
+            nmasked_kspace, mean, std = utils.standardize(masked_kspace)
+            noriginal_kspace, mean, std = utils.standardize(original_kspace, mean, std)
 
         # transforming the input according to dimension and type 
         noriginal_kspace, nmasked_kspace = utils.transformshape(noriginal_kspace), utils.transformshape(nmasked_kspace)
@@ -174,6 +181,7 @@ for i in range(start_epoch, args.epoch):
         loss_itr = loss_kspace.data.item() + loss_image.data.item()
         
         total_val_loss += loss_itr
+
         if j % 100 == 0:
             avg_loss = total_val_loss/(j+1)
             print(j+1, ': AVG VALIDATION LOSS:', avg_loss, 'ITR LOSS:', loss_itr)

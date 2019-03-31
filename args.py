@@ -29,5 +29,6 @@ def get_args():
     parser.add_argument("--polar", action= "store_true", help="Whether to convert the complex kspace to polar form and then consider as input to the model")
     parser.add_argument("--resume", action="store_true", help="Whether to resume or start afresh")
     parser.add_argument('--out-dir', type=pathlib.Path, default=pathlib.Path("output"), help='Name of the directory to store the output')
+    parser.add_argument('--preprocess', choices = ['standardize', 'unitize'], default="unitize", help='The type of preprocessing to be applied to the input before feeding to the model')
 
     return parser.parse_args()
